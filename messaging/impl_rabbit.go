@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"bytes"
+	"encoding/json"
 	"github.com/streadway/amqp"
 	"log"
 	"strings"
@@ -28,8 +29,36 @@ type AMQPConnection struct {
 //func (ra_driver RabbitDriver) send(t target.Target, msg string) {
 //
 //}
+
+type Endpoint struct {
+	NameSpace, Version string
+	Method             func(args ...interface{})
+}
+
+var Method_mapping map[string]Endpoint
+
 func Process_msg(d amqp.Delivery) {
-	log.Println("Received a message:", *BytesToString(&(d.Body)))
+	msg := *BytesToString(&(d.Body))
+	//log.Println("Received a message:", *BytesToString(&(d.Body)))
+	mess_body := Message{}
+	err := json.Unmarshal(d.Body, &mess_body)
+	FailOnErr(err, "解析失败")
+	log.Println("Received a message:", msg)
+
+	oslo_message := OsloMessage{}
+	str := []byte(mess_body.Message_body)
+	err = json.Unmarshal(str, &oslo_message)
+	FailOnErr(err, "解析失败")
+
+	endpoint, existed := Method_mapping[oslo_message.Method]
+	if existed {
+		//var params []reflect.Value
+		//params = append(params, reflect.ValueOf())
+		endpoint.Method()
+	} else {
+		log.Println("No this method")
+	}
+
 }
 
 func BytesToString(b *[]byte) *string {
@@ -61,7 +90,7 @@ func (conn *AMQPConnection) AMQP_set_channel(connectionTimeout time.Duration) (s
 func (conn *AMQPConnection) DeclareDirectConsumer(topic string, callback func(d amqp.Delivery)) {
 	_, err := conn.ch.QueueDeclare(
 		topic, // name
-		false, // durable
+		true,  // durable
 		false, // delete when unused
 		false, // exclusive
 		false, // no-wait
@@ -146,13 +175,13 @@ func (conn *AMQPConnection) DeclareFanoutConsumer(topic string, callback func(d 
 		fanout_exchange.String(),
 		"fanout",
 		false,
-		false,
+		true,
 		false, false,
 		nil)
 	FailOnErr(err, "Exchange Declare error")
 	_, err = conn.ch.QueueDeclare(
 		fanout_queue.String(), // name
-		false,                 // durable
+		true,                  // durable
 		false,                 // delete when unused
 		false,                 // exclusive
 		false,                 // no-wait
@@ -215,6 +244,7 @@ func (conn *AMQPConnection) Listen(target Target) {
 	if target.Server != "" {
 		var topic_server strings.Builder
 		topic_server.WriteString(target.Topic)
+		topic_server.WriteString(".")
 		topic_server.WriteString(target.Server)
 		conn.DeclareTopicConsumer(target.Exchange, topic_server.String(), Process_msg)
 	}
@@ -234,4 +264,18 @@ func (conn *AMQPConnection) Listen(target Target) {
 			break
 		}
 	}
+}
+
+func StartConsumer(target Target, endpoints map[string]Endpoint, conn *AMQPConnection) {
+
+	//for index, _ := range endopints{
+	//	endpoint := reflect.ValueOf(&endopints[index])
+	//	typ := endpoint.Type()
+	//	for i := 0; i < endpoint.NumMethod(); i++{
+	//		//v := endpoint.Method(i)
+	//		Method_mapping[typ.Method(i).Name] =  endpoint.Method(i)
+	//	}
+	//}
+	Method_mapping = endpoints
+	conn.Listen(target)
 }
