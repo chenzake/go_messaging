@@ -32,29 +32,33 @@ type AMQPConnection struct {
 
 type Endpoint struct {
 	NameSpace, Version string
-	Method             func(args ...interface{})
+	Method             func(args ...interface{}) interface{}
 }
 
 var Method_mapping map[string]Endpoint
 
-func Process_msg(d amqp.Delivery) {
+func (conn *AMQPConnection) ProcessMsg(d amqp.Delivery) {
 	msg := *BytesToString(&(d.Body))
 	//log.Println("Received a message:", *BytesToString(&(d.Body)))
-	mess_body := Message{}
-	err := json.Unmarshal(d.Body, &mess_body)
-	FailOnErr(err, "解析失败")
+	messbody := Message{}
+	err := json.Unmarshal(d.Body, &messbody)
+	FailOnLog(err, "解析失败")
 	log.Println("Received a message:", msg)
 
-	oslo_message := OsloMessage{}
-	str := []byte(mess_body.Message_body)
-	err = json.Unmarshal(str, &oslo_message)
-	FailOnErr(err, "解析失败")
+	oslomessage := OsloMessage{}
+	str := []byte(messbody.Message_body.(string))
+	err = json.Unmarshal(str, &oslomessage)
+	FailOnLog(err, "解析失败")
 
-	endpoint, existed := Method_mapping[oslo_message.Method]
+	endpoint, existed := Method_mapping[oslomessage.Method]
 	if existed {
 		//var params []reflect.Value
 		//params = append(params, reflect.ValueOf())
-		endpoint.Method()
+		res := endpoint.Method()
+		if oslomessage.Reply_queue != "" {
+			oslomessage.Reply(res, conn)
+		}
+
 	} else {
 		log.Println("No this method")
 	}
@@ -78,16 +82,16 @@ func (conn *AMQPConnection) AMQP_set_channel(connectionTimeout time.Duration) (s
 	conn.conn, err = amqp.DialConfig(conn.URL, amqp.Config{Dial: amqp.DefaultDial(connectionTimeout)})
 	//conn.conn, err = amqp.Dial(conn.URL)
 	//defer conn.conn.Close()
-	FailOnErr(err, "connect failed")
+	FailOnLog(err, "connect failed")
 
 	conn.ch, err = conn.conn.Channel()
-	FailOnErr(err, "channel failed")
+	FailOnLog(err, "channel failed")
 	success = true
 	log.Println("Connected rabbitmq with", conn.URL)
 	return success
 }
 
-func (conn *AMQPConnection) DeclareDirectConsumer(topic string, callback func(d amqp.Delivery)) {
+func (conn *AMQPConnection) DeclareDirectConsumer(topic string) {
 	_, err := conn.ch.QueueDeclare(
 		topic, // name
 		true,  // durable
@@ -96,7 +100,7 @@ func (conn *AMQPConnection) DeclareDirectConsumer(topic string, callback func(d 
 		false, // no-wait
 		nil,   // arguments
 	)
-	FailOnErr(err, "QueueDeclare error")
+	FailOnErrExit(err, "QueueDeclare error")
 
 	msgs, err := conn.ch.Consume(
 		topic, // queue
@@ -111,13 +115,13 @@ func (conn *AMQPConnection) DeclareDirectConsumer(topic string, callback func(d 
 		for d := range msgs {
 			//err = json.Unmarshal(d.Body, &res)
 			//log.Println(res)
-			callback(d)
+			go conn.ProcessMsg(d)
 			log.Println("from", topic, "Received a message", *BytesToString(&(d.Body)))
 		}
 	}()
 }
 
-func (conn *AMQPConnection) DeclareTopicConsumer(exchange, topic string, callback func(d amqp.Delivery)) {
+func (conn *AMQPConnection) DeclareTopicConsumer(exchange, topic string) {
 
 	err := conn.ch.ExchangeDeclare(
 		exchange,
@@ -126,7 +130,7 @@ func (conn *AMQPConnection) DeclareTopicConsumer(exchange, topic string, callbac
 		false,
 		false, false,
 		nil)
-	FailOnErr(err, "Exchange Declare error")
+	FailOnErrExit(err, "Exchange Declare error")
 	_, err = conn.ch.QueueDeclare(
 		topic, // name
 		false, // durable
@@ -135,7 +139,7 @@ func (conn *AMQPConnection) DeclareTopicConsumer(exchange, topic string, callbac
 		false, // no-wait
 		nil,   // arguments
 	)
-	FailOnErr(err, "QueueDeclare error")
+	FailOnErrExit(err, "QueueDeclare error")
 
 	err = conn.ch.QueueBind(
 		topic,
@@ -143,7 +147,7 @@ func (conn *AMQPConnection) DeclareTopicConsumer(exchange, topic string, callbac
 		exchange,
 		false,
 		nil)
-	FailOnErr(err, "QueueBind")
+	FailOnErrExit(err, "QueueBind")
 	msgs, err := conn.ch.Consume(
 		topic, // queue
 		"",    // consumer
@@ -157,14 +161,14 @@ func (conn *AMQPConnection) DeclareTopicConsumer(exchange, topic string, callbac
 		for d := range msgs {
 			//err = json.Unmarshal(d.Body, &res)
 			//log.Println(res)
-			callback(d)
+			go conn.ProcessMsg(d)
 			log.Println("from", topic, "Received a message", *BytesToString(&(d.Body)))
 		}
 	}()
 
 }
 
-func (conn *AMQPConnection) DeclareFanoutConsumer(topic string, callback func(d amqp.Delivery)) {
+func (conn *AMQPConnection) DeclareFanoutConsumer(topic string) {
 
 	var fanout_exchange, fanout_queue strings.Builder
 	fanout_exchange.WriteString(topic)
@@ -178,7 +182,7 @@ func (conn *AMQPConnection) DeclareFanoutConsumer(topic string, callback func(d 
 		true,
 		false, false,
 		nil)
-	FailOnErr(err, "Exchange Declare error")
+	FailOnErrExit(err, "Exchange Declare error")
 	_, err = conn.ch.QueueDeclare(
 		fanout_queue.String(), // name
 		true,                  // durable
@@ -187,7 +191,7 @@ func (conn *AMQPConnection) DeclareFanoutConsumer(topic string, callback func(d 
 		false,                 // no-wait
 		nil,                   // arguments
 	)
-	FailOnErr(err, "QueueDeclare error")
+	FailOnErrExit(err, "QueueDeclare error")
 
 	err = conn.ch.QueueBind(
 		fanout_queue.String(),
@@ -195,7 +199,7 @@ func (conn *AMQPConnection) DeclareFanoutConsumer(topic string, callback func(d 
 		fanout_exchange.String(),
 		false,
 		nil)
-	FailOnErr(err, "QueueBind")
+	FailOnErrExit(err, "QueueBind")
 
 	msgs, err := conn.ch.Consume(
 		fanout_queue.String(), // queue
@@ -210,7 +214,7 @@ func (conn *AMQPConnection) DeclareFanoutConsumer(topic string, callback func(d 
 		for d := range msgs {
 			//err = json.Unmarshal(d.Body, &res)
 			//log.Println(res)
-			callback(d)
+			go conn.ProcessMsg(d)
 			log.Println("from", fanout_queue.String(), "Received a message", *BytesToString(&(d.Body)))
 		}
 	}()
@@ -233,22 +237,20 @@ func (conn *AMQPConnection) Listen(target Target) {
 			break
 		}
 	}
-	defer conn.ch.Close()
-	defer conn.conn.Close()
 	//forever := make(chan bool)
 	closeChan := make(chan *amqp.Error, 1)
 	notifyClose := conn.ch.NotifyClose(closeChan)
 	closeFlag := false
 
-	conn.DeclareTopicConsumer(target.Exchange, target.Topic, Process_msg)
+	conn.DeclareTopicConsumer(target.Exchange, target.Topic)
 	if target.Server != "" {
 		var topic_server strings.Builder
 		topic_server.WriteString(target.Topic)
 		topic_server.WriteString(".")
 		topic_server.WriteString(target.Server)
-		conn.DeclareTopicConsumer(target.Exchange, topic_server.String(), Process_msg)
+		conn.DeclareTopicConsumer(target.Exchange, topic_server.String())
 	}
-	conn.DeclareFanoutConsumer(target.Topic, Process_msg)
+	conn.DeclareFanoutConsumer(target.Topic)
 	for {
 		select {
 		case e := <-notifyClose:
@@ -266,6 +268,19 @@ func (conn *AMQPConnection) Listen(target Target) {
 	}
 }
 
+func (conn *AMQPConnection) SendReply(reply_q string, msg []byte) {
+	publishing := amqp.Publishing{
+		ContentType:     "application/json",
+		ContentEncoding: "utf-8",
+		DeliveryMode:    2,
+		Priority:        0,
+		Body:            msg,
+	}
+	err := conn.ch.Publish("", reply_q, false, false, publishing)
+	log.Println(reply_q, string(msg))
+	FailOnLog(err, "Reply Failed")
+}
+
 func StartConsumer(target Target, endpoints map[string]Endpoint, conn *AMQPConnection) {
 
 	//for index, _ := range endopints{
@@ -279,3 +294,34 @@ func StartConsumer(target Target, endpoints map[string]Endpoint, conn *AMQPConne
 	Method_mapping = endpoints
 	conn.Listen(target)
 }
+
+//var (
+//	Trace   *log.Logger // 记录所有日志
+//	Info    *log.Logger // 重要的信息
+//	Warning *log.Logger // 需要注意的信息
+//	Error   *log.Logger // 非常严重的问题
+//)
+//
+//func init() {
+//	//file, err := os.OpenFile("errors.txt",
+//	//	os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+//	//if err != nil {
+//	//	log.Fatalln("Failed to open error log file:", err)
+//	//}
+//
+//	Trace = log.New(os.Stdout,
+//		"TRACE: ",
+//		log.Ldate|log.Ltime|log.Lshortfile)
+//
+//	Info = log.New(os.Stdout,
+//		"INFO: ",
+//		log.Ldate|log.Ltime|log.Lshortfile)
+//
+//	Warning = log.New(os.Stdout,
+//		"WARNING: ",
+//		log.Ldate|log.Ltime|log.Lshortfile)
+//
+//	Error = log.New(os.Stdout,
+//		"ERROR: ",
+//		log.Ldate|log.Ltime|log.Lshortfile)
+//}

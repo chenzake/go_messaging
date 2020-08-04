@@ -19,8 +19,9 @@ import (
 	_ "net/http/pprof"
 )
 
-func Print(args ...interface{}) {
+func Print(args ...interface{}) interface{} {
 	log.Println("my test")
+	return "test"
 }
 
 func main() {
