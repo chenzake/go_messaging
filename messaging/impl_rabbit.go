@@ -263,6 +263,7 @@ func (conn *AMQPConnection) Listen(target Target) {
 		}
 		//<-forever
 		if closeFlag {
+			log.Println("Stop service go messaging")
 			break
 		}
 	}
